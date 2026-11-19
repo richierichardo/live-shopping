@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 800">
+  <defs>
+    <linearGradient id="fabric" x2=".8" y2="1"><stop stop-color="#242321"/><stop offset=".55" stop-color="#121211"/><stop offset="1" stop-color="#292824"/></linearGradient>
+    <filter id="shadow" x="-30%" y="-20%" width="160%" height="160%"><feDropShadow dx="0" dy="24" stdDeviation="21" flood-color="#251f16" flood-opacity=".2"/></filter>
+    <pattern id="checks" width="20" height="20" patternUnits="userSpaceOnUse"><rect width="10" height="10" fill="#e6dfd2"/><rect x="10" y="10" width="10" height="10" fill="#e6dfd2"/></pattern>
+  </defs>
+  <rect width="640" height="800" fill="#e8e3d9"/>
+  <circle cx="520" cy="130" r="145" fill="#dcd4c6"/><path d="M0 690 640 525v275H0Z" fill="#d6cebf"/>
+  <g filter="url(#shadow)">
+    <path d="m205 143 73-38h83l74 38 103 67-57 104-63-33v311c-64 25-167 25-230 0V281l-64 33-57-104z" fill="url(#fabric)" stroke="#080808" stroke-width="7" stroke-linejoin="round"/>
+    <path d="m278 106 42 43 41-43" fill="#0a0a0a" stroke="#6f654f" stroke-width="5"/>
+    <path d="m198 155-80 58 46 81 47-24zm244 0 80 58-46 81-47-24z" fill="#30302d"/>
+    <path d="m165 244 56-22v25l-43 20zm310-22 56 22-13 23-43-20z" fill="url(#checks)" opacity=".95"/>
+    <path d="M257 285h126v42H257z" fill="#d9cfb6"/><text x="320" y="313" fill="#171715" text-anchor="middle" font-family="Arial,sans-serif" font-weight="900" font-size="22" letter-spacing="2">GOODLUCH</text>
+    <path d="M268 356h104" stroke="#c49f5d" stroke-width="6"/><path d="M269 369h60" stroke="#eee6d7" stroke-width="4"/>
+    <text x="320" y="416" fill="#eee6d7" text-anchor="middle" font-family="Arial,sans-serif" font-weight="900" font-size="29" letter-spacing="3">RETRO</text>
+    <text x="320" y="448" fill="#c49f5d" text-anchor="middle" font-family="Arial,sans-serif" font-weight="900" font-size="20" letter-spacing="3">RACING GROUP</text>
+    <path d="M224 477h192" stroke="#484642" stroke-width="2"/>
+    <text x="320" y="508" fill="#c3bba9" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="12" letter-spacing="4">FIND YOUR OWN LINE</text>
+  </g>
+  <text x="34" y="756" fill="#5b554b" font-family="Arial,sans-serif" font-size="12" font-weight="700" letter-spacing="3">GOODLUCH / VOL. 01</text>
+  <text x="606" y="756" fill="#5b554b" text-anchor="end" font-family="Arial,sans-serif" font-size="12" font-weight="700" letter-spacing="3">001</text>
+</svg>
