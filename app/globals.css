@@ -235,23 +235,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .modal-close { border: 1px solid var(--line); }
 .tryon-workspace { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(230px, .6fr); gap: 22px; }
 .camera-stage { position: relative; overflow: hidden; min-height: 390px; aspect-ratio: 4 / 3; isolation: isolate; background: radial-gradient(ellipse at 50% 42%, #424039 0, #22221e 48%, #11110f 100%); }
-.camera-video, .camera-garment, .camera-occlusion, .camera-underlay, .camera-warp { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.camera-video, .camera-garment, .camera-occlusion { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 /* Mirror video only. Composite layers stay unmirrored; landmarks are X-flipped in mapPose.
-   Order: video → shirt dim underlay → 2.5D warp → garment → head/hands overlay. */
+   Order: video → 3D garment → head/hands overlay. */
 .camera-video { z-index: 0; transform: scaleX(-1); opacity: 0; transition: opacity .25s; }
 .is-camera-active .camera-video { opacity: 1; }
-.camera-underlay { z-index: 1; pointer-events: none; transition: opacity .18s linear; }
-.camera-warp { z-index: 2; pointer-events: none; transition: opacity .18s linear; }
 .camera-garment { z-index: 3; pointer-events: none; transition: opacity .18s linear; }
 .is-camera-active .camera-garment { z-index: 3; }
 .camera-occlusion { z-index: 4; pointer-events: none; }
-.camera-garment-mask {
-  position: absolute;
-  width: 0;
-  height: 0;
-  opacity: 0;
-  pointer-events: none;
-}
 .camera-pointer-catcher { position: absolute; z-index: 5; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
 .camera-pointer-catcher:active { cursor: grabbing; }
 .is-camera-active .camera-pointer-catcher { pointer-events: none; }
@@ -261,7 +252,24 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .camera-stage-top, .camera-stage-bottom { position: absolute; z-index: 5; right: 14px; left: 14px; display: flex; justify-content: space-between; color: white; font-size: 8px; font-weight: 800; letter-spacing: .14em; pointer-events: none; }
 .camera-stage-top { top: 14px; }
 .camera-stage-bottom { bottom: 14px; color: #f1eadb; text-shadow: 0 1px 3px #000; }
-.debug-toggle { position: absolute; z-index: 5; top: 36px; right: 12px; padding: 7px 9px; border: 1px solid #ffffff55; background: #11110fbf; color: white; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }
+.tryon-debug-controls { position: absolute; z-index: 6; top: 36px; right: 12px; display: flex; gap: 6px; }
+.debug-toggle { padding: 7px 9px; border: 1px solid #ffffff55; background: #11110fbf; color: white; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }
+.tryon-asset-fallback { position: absolute; z-index: 6; top: 12px; left: 12px; max-width: min(320px, calc(100% - 140px)); padding: 8px 10px; border: 1px solid #c43f32; background: #3a1210e6; color: #ffd8d2; font-size: 9px; font-weight: 700; line-height: 1.4; }
+.tryon-debug-panel { position: absolute; z-index: 6; right: 12px; bottom: 42px; width: min(250px, calc(100% - 24px)); padding: 10px; border: 1px solid #ffffff33; background: #11110fe8; color: #f4f0e8; font-size: 9px; line-height: 1.4; pointer-events: auto; }
+.tryon-debug-panel header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.tryon-debug-panel header strong { font-size: 9px; letter-spacing: .1em; }
+.tryon-debug-panel header span { color: #9f9a90; font-size: 8px; }
+.tryon-debug-panel dl { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; margin: 0; }
+.tryon-debug-panel dl div { display: flex; justify-content: space-between; gap: 8px; }
+.tryon-debug-panel dt { color: #9f9a90; }
+.tryon-debug-panel dd { margin: 0; font-variant-numeric: tabular-nums; }
+.tryon-debug-fallback { margin: 8px 0 0; color: #ff9d90; }
+.tryon-debug-joints { margin: 8px 0 0; color: #d7d1c5; font-variant-numeric: tabular-nums; }
+.tryon-debug-skeleton { display: flex; align-items: center; gap: 7px; margin-top: 9px; color: #eee9df; cursor: pointer; }
+.tryon-debug-skeleton input { margin: 0; }
+.tryon-debug-source { display: flex; flex-direction: column; gap: 4px; margin-top: 9px; color: #d7d1c5; }
+.tryon-debug-source select { width: 100%; padding: 5px 6px; border: 1px solid #ffffff33; background: #1c1c18; color: #f4f0e8; font-size: 9px; }
+.tryon-debug-residuals { margin: 8px 0 0; color: #9ec9ff; font-variant-numeric: tabular-nums; }
 .pose-lost { position: absolute; z-index: 4; top: 50%; left: 50%; width: max-content; max-width: calc(100% - 32px); padding: 9px 12px; background: #11110fc9; color: #f4f0e8; font-size: 9px; font-weight: 700; text-align: center; transform: translate(-50%, -50%); }
 .camera-live { color: #f06b5b; }
 .camera-idle { color: #aaa69d; }

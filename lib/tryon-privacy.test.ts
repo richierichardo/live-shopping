@@ -31,8 +31,10 @@ describe("try-on privacy and camera settings", () => {
     expect(modalSource).not.toMatch(/navigator\.sendBeacon/);
     expect(modalSource).not.toMatch(/WebSocket\s*\(/);
 
-    // toDataURL / toBlob may be used for local CSS masks — must not be posted remotely.
-    expect(modalSource).not.toMatch(/toDataURL\([^)]*\)\s*[,;)][^;]*fetch/);
+    expect(modalSource).not.toMatch(/toBlob\s*\(/);
+    expect(modalSource).not.toMatch(/drawWarpedTexture/);
+    expect(modalSource).not.toMatch(/mask-image/);
+    expect(modalSource).not.toMatch(/toDataURL\s*\(/);
     expect(modalSource).not.toMatch(/FormData[\s\S]{0,200}(?:video|canvas)/i);
   });
 

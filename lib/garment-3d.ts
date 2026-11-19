@@ -2,16 +2,45 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { GARMENT_RIG } from "./garment-rig";
 import {
+  assignGarmentMap,
   buildGarment,
   makeBodyTexture,
   makeSleeveTexture,
   type BoneMap,
   type BuiltGarment,
 } from "./garment-mesh";
+import { buildModelAnchors, computeAnchorFit, type AnchorResidual, type ModelAnchorPoints } from "./tryon-anchors";
 import { measureBodyProxy } from "./tryon-body";
 import type { HeadPoints } from "./tryon-mask";
+import type { DebugScreenJoint, TryOnAssetSource, TryOnHideReason } from "./tryon-debug";
+import {
+  armTargetsFromWorld,
+  buildBodyFrame,
+  depthScaleFromWorldZ,
+  orthoToStage,
+  stageToOrtho,
+  type Vec3,
+} from "./tryon-coords";
+import type { TrackingState } from "./tryon-track";
+import { dtAlpha } from "./tryon-track";
 
 export { GARMENT_RIG } from "./garment-rig";
+export { stageToOrtho, orthoToStage, buildBodyFrame, armTargetsFromWorld } from "./tryon-coords";
+
+export type GarmentAssetInfo = {
+  source: TryOnAssetSource;
+  fallbackReason: string | null;
+  requestedGlbUrl: string | null;
+};
+
+export type GarmentDebugFrame = {
+  hideReason: TryOnHideReason;
+  lastRenderMs: number;
+  modelJoints: DebugScreenJoint[];
+  asset: GarmentAssetInfo;
+  anchorResiduals: AnchorResidual[];
+  modelAnchors: ModelAnchorPoints | null;
+};
 
 export type ScreenPoint = { x: number; y: number; visibility?: number };
 export type WorldPoint = { x: number; y: number; z: number; visibility?: number };
@@ -40,7 +69,6 @@ export type GarmentRendererOptions = {
   productName: string;
   color?: string;
   glbUrl?: string;
-  frontTextureUrl?: string;
   sleeveLength?: "long" | "short";
   anchors?: { shoulderWidth: number; torsoHeight: number; hemY: number };
 };
@@ -50,6 +78,13 @@ export type PoseUpdateOptions = {
   /** 0–1 torso visibility; drives material opacity when pose is weak. */
   confidence?: number;
   anchors?: { shoulderWidth: number; torsoHeight: number; hemY: number } | null;
+  /** Hide skinned meshes; keep bone transforms for skeleton-only debug. */
+  skeletonOnly?: boolean;
+  /** Relative arm-length scales from proportion calibration. 1 = bind length. */
+  segmentScales?: { upperL: number; upperR: number; forearmL: number; forearmR: number };
+  /** Seconds since the previous pose update, for time-based slerp. */
+  dtSeconds?: number;
+  trackingState?: TrackingState;
 };
 
 export type Garment3DRenderer = {
@@ -58,12 +93,15 @@ export type Garment3DRenderer = {
   updatePose: (pose: GarmentPose | null, width: number, height: number, options?: PoseUpdateOptions) => void;
   resetInspect: () => void;
   dispose: () => void;
+  getAssetInfo: () => GarmentAssetInfo;
+  getDebugFrame: () => GarmentDebugFrame;
+  setSkeletonOnly: (enabled: boolean) => void;
 };
 
 const BONE_DOWN = new THREE.Vector3(0, -1, 0);
 const ARM_BONES = ["upper_arm.L", "forearm.L", "upper_arm.R", "forearm.R"] as const;
-const BONE_SLERP = 0.42;
-const ARM_ANGLE_LIMIT = 1.25;
+const UPPER_ARM_LIMIT = 2.4;
+const FOREARM_LIMIT = 2.2;
 
 /** GLTFExporter strips dots from node names (`shoulder.L` → `shoulderL`). Restore contract names. */
 function normalizeBoneNames(root: THREE.Object3D) {
@@ -89,18 +127,6 @@ function collectBones(root: THREE.Object3D): BoneMap {
     }
   });
   return bones;
-}
-
-async function loadOptionalTexture(url?: string): Promise<THREE.Texture | null> {
-  if (!url) return null;
-  try {
-    const texture = await new THREE.TextureLoader().loadAsync(url);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.needsUpdate = true;
-    return texture;
-  } catch {
-    return null;
-  }
 }
 
 function garmentFromProcedural(
@@ -160,9 +186,8 @@ async function garmentFromGlb(
   for (const mesh of meshes) {
     const material = mesh.material;
     if (!(material instanceof THREE.MeshStandardMaterial)) continue;
-    if (mesh.name.toLowerCase().includes("sleeve")) material.map = sleeveMap;
-    else material.map = paintedTorso;
-    material.needsUpdate = true;
+    if (mesh.name.toLowerCase().includes("sleeve")) assignGarmentMap(material, sleeveMap);
+    else assignGarmentMap(material, paintedTorso);
   }
 
   // Re-bind every skinned mesh to one shared skeleton built from contract bones.
@@ -177,12 +202,15 @@ async function garmentFromGlb(
   if (!collar) {
     collar = new THREE.Mesh(
       new THREE.TorusGeometry(0.125, 0.02, 12, 48),
-      new THREE.MeshStandardMaterial({ color: 0x111210, roughness: 0.86 }),
+      new THREE.MeshStandardMaterial({ color: 0xd8d4cc, roughness: 0.86 }),
     );
     collar.name = "collar";
-    collar.position.set(0, 0.49, 0);
+  }
+  const neck = bones.get("neck");
+  if (neck && collar.parent !== neck) {
+    neck.add(collar);
+    collar.position.set(0, 0.07, 0);
     collar.rotation.x = Math.PI / 2;
-    root.add(collar);
   }
 
   root.updateMatrixWorld(true);
@@ -192,11 +220,34 @@ async function garmentFromGlb(
 
 /**
  * Selfie-mirrored screen pixels → Three.js orthographic world.
- * Screen: x right, y down from top. Three ortho: x right, y up, origin at stage center.
+ * Z is required — do not omit for tracked joints (avoids silent Z=0 arm flatten).
  */
-export function screenToWorld(screenX: number, screenY: number, width: number, height: number, z = 0) {
-  return new THREE.Vector3(screenX - width / 2, height / 2 - screenY, z);
+export function screenToWorld(screenX: number, screenY: number, width: number, height: number, z: number) {
+  const point = stageToOrtho(screenX, screenY, width, height, z);
+  return new THREE.Vector3(point.x, point.y, point.z);
 }
+
+/** Inverse of screenToWorld XY for orthographic projections. */
+export function worldToScreen(worldX: number, worldY: number, width: number, height: number) {
+  return orthoToStage(worldX, worldY, width, height);
+}
+
+function toVec3(v: THREE.Vector3): Vec3 {
+  return { x: v.x, y: v.y, z: v.z };
+}
+
+const MODEL_DEBUG_BONES = [
+  "pelvis",
+  "spine",
+  "chest",
+  "neck",
+  "shoulder.L",
+  "upper_arm.L",
+  "forearm.L",
+  "shoulder.R",
+  "upper_arm.R",
+  "forearm.R",
+] as const;
 
 export async function createGarment3DRenderer(
   canvas: HTMLCanvasElement,
@@ -211,7 +262,7 @@ export async function createGarment3DRenderer(
   const glbUrl = resolved.glbUrl;
   const sleeveLength = resolved.sleeveLength ?? "long";
   const assetAnchors = resolved.anchors ?? null;
-  const frontTexture = await loadOptionalTexture(resolved.frontTextureUrl);
+  // The skinned mesh uses its UV cloth texture. Catalog photos stay on the product page.
 
   const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, premultipliedAlpha: false, powerPreference: "low-power" });
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -232,15 +283,27 @@ export async function createGarment3DRenderer(
   rimLight.position.set(0, 1.5, -2.5);
   scene.add(rimLight);
 
+  let assetInfo: GarmentAssetInfo = {
+    source: "procedural",
+    fallbackReason: glbUrl ? null : "no_glb_requested",
+    requestedGlbUrl: glbUrl ?? null,
+  };
   let garment: BuiltGarment;
   if (glbUrl) {
     try {
-      garment = await garmentFromGlb(glbUrl, productName, color, frontTexture);
-    } catch {
-      garment = garmentFromProcedural(productName, color, sleeveLength, frontTexture);
+      garment = await garmentFromGlb(glbUrl, productName, color);
+      assetInfo = { source: "glb", fallbackReason: null, requestedGlbUrl: glbUrl };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "glb_load_failed";
+      assetInfo = {
+        source: "procedural",
+        fallbackReason: message,
+        requestedGlbUrl: glbUrl,
+      };
+      garment = garmentFromProcedural(productName, color, sleeveLength);
     }
   } else {
-    garment = garmentFromProcedural(productName, color, sleeveLength, frontTexture);
+    garment = garmentFromProcedural(productName, color, sleeveLength);
   }
 
   const garmentGroup = new THREE.Group();
@@ -250,8 +313,44 @@ export async function createGarment3DRenderer(
   let viewport = { width: 0, height: 0 };
   let inspectRotation = { x: -0.04, y: -0.32 };
   let disposed = false;
+  let skeletonOnly = false;
+  let hideReason: TryOnHideReason = "inactive";
+  let lastRenderMs = 0;
+  let modelJoints: DebugScreenJoint[] = [];
+  let anchorResiduals: AnchorResidual[] = [];
   const prevArmQuats = new Map<string, THREE.Quaternion>();
   const targetArmQuats = new Map<string, THREE.Quaternion>();
+  const _jointWorld = new THREE.Vector3();
+
+  const applySkeletonOnlyVisibility = () => {
+    for (const mesh of garment.meshes) {
+      mesh.visible = !skeletonOnly;
+    }
+    garment.collar.visible = !skeletonOnly;
+  };
+
+  const collectModelJoints = (width: number, height: number) => {
+    garment.root.updateMatrixWorld(true);
+    const next: DebugScreenJoint[] = [];
+    for (const name of MODEL_DEBUG_BONES) {
+      const bone = garment.bones.get(name);
+      if (!bone) continue;
+      bone.getWorldPosition(_jointWorld);
+      const screen = worldToScreen(_jointWorld.x, _jointWorld.y, width, height);
+      next.push({ x: screen.x, y: screen.y, label: name, kind: "model" });
+    }
+    modelJoints = next;
+  };
+
+  const finishRender = (width: number, height: number, reason: TryOnHideReason) => {
+    const started = performance.now();
+    applySkeletonOnlyVisibility();
+    if (garmentGroup.visible) collectModelJoints(width, height);
+    else modelJoints = [];
+    renderer.render(scene, camera);
+    lastRenderMs = performance.now() - started;
+    hideReason = reason;
+  };
 
   const resize = (width: number, height: number) => {
     if (disposed || width < 1 || height < 1) return;
@@ -271,7 +370,7 @@ export async function createGarment3DRenderer(
     garmentGroup.position.set(0, 0, 0);
     garmentGroup.scale.setScalar(Math.min(width / 2.05, height / 1.85));
     garmentGroup.rotation.set(inspectRotation.x, inspectRotation.y, 0);
-    renderer.render(scene, camera);
+    finishRender(width, height, "inactive");
   };
 
   const rotateInspect = (deltaX: number, deltaY: number) => {
@@ -296,11 +395,39 @@ export async function createGarment3DRenderer(
     }
   }
 
-  // Bind-pose shoulder tips in root space — arm IK starts here so sleeves stay attached.
+  // Bind-pose joints in root space — arm IK + explicit anchors for screen fitting.
   garment.root.updateMatrixWorld(true);
+  const rootLocal = (boneName: (typeof GARMENT_RIG.bones)[number]) =>
+    toVec3(garment.root.worldToLocal(garment.bones.get(boneName)!.getWorldPosition(new THREE.Vector3())));
+
+  const forearmRestTip = (side: "L" | "R") => {
+    const upper = garment.bones.get(`upper_arm.${side}`)!;
+    const forearm = garment.bones.get(`forearm.${side}`)!;
+    const dirParent = forearm.position.clone();
+    const len = Math.max(dirParent.length(), 0.2);
+    const elbowWorld = forearm.getWorldPosition(new THREE.Vector3());
+    const worldDir = dirParent.normalize();
+    worldDir.transformDirection(upper.matrixWorld);
+    const tip = elbowWorld.add(worldDir.multiplyScalar(len));
+    return toVec3(garment.root.worldToLocal(tip));
+  };
+
+  const hemY = assetAnchors?.hemY ?? -0.52;
+  const modelAnchors = buildModelAnchors({
+    shoulderL: rootLocal("shoulder.L"),
+    shoulderR: rootLocal("shoulder.R"),
+    elbowL: rootLocal("forearm.L"),
+    elbowR: rootLocal("forearm.R"),
+    wristL: forearmRestTip("L"),
+    wristR: forearmRestTip("R"),
+    pelvis: rootLocal("pelvis"),
+    neck: rootLocal("neck"),
+    hemY,
+  });
+
   const bindShoulderRoot = {
-    L: garment.root.worldToLocal(garment.bones.get("shoulder.L")!.getWorldPosition(new THREE.Vector3())),
-    R: garment.root.worldToLocal(garment.bones.get("shoulder.R")!.getWorldPosition(new THREE.Vector3())),
+    L: new THREE.Vector3(modelAnchors.shoulderL.x, modelAnchors.shoulderL.y, modelAnchors.shoulderL.z),
+    R: new THREE.Vector3(modelAnchors.shoulderR.x, modelAnchors.shoulderR.y, modelAnchors.shoulderR.z),
   };
 
   const resetBones = () => {
@@ -320,9 +447,10 @@ export async function createGarment3DRenderer(
 
   const clampTowardBind = (name: string, target: THREE.Quaternion) => {
     const bind = bindArmQuats.get(name) ?? new THREE.Quaternion();
+    const limit = name.startsWith("forearm") ? FOREARM_LIMIT : UPPER_ARM_LIMIT;
     const angle = bind.angleTo(target);
-    if (angle <= ARM_ANGLE_LIMIT) return target;
-    const t = ARM_ANGLE_LIMIT / Math.max(angle, 1e-5);
+    if (angle <= limit) return target;
+    const t = limit / Math.max(angle, 1e-5);
     return bind.clone().slerp(target, t);
   };
 
@@ -349,13 +477,14 @@ export async function createGarment3DRenderer(
     targetArmQuats.set(name, clampTowardBind(name, raw));
   };
 
-  const applyArmSlerp = () => {
+  const applyArmSlerp = (dtSeconds: number) => {
+    const alpha = dtAlpha(dtSeconds, 0.08);
     for (const name of ARM_BONES) {
       const bone = garment.bones.get(name);
       const target = targetArmQuats.get(name);
       if (!bone || !target) continue;
       const previous = prevArmQuats.get(name) ?? target;
-      bone.quaternion.copy(previous).slerp(target, BONE_SLERP);
+      bone.quaternion.copy(previous).slerp(target, alpha);
       prevArmQuats.set(name, bone.quaternion.clone());
     }
     targetArmQuats.clear();
@@ -363,45 +492,84 @@ export async function createGarment3DRenderer(
 
   const updatePose = (pose: GarmentPose | null, width: number, height: number, options?: PoseUpdateOptions) => {
     resize(width, height);
+    if (typeof options?.skeletonOnly === "boolean") {
+      skeletonOnly = options.skeletonOnly;
+    }
+    if (options?.trackingState === "lost") {
+      garmentGroup.visible = false;
+      anchorResiduals = [];
+      finishRender(width, height, "tracking_lost");
+      return;
+    }
     if (!pose) {
       garmentGroup.visible = false;
       prevArmQuats.clear();
-      renderer.render(scene, camera);
+      anchorResiduals = [];
+      finishRender(width, height, "null_pose");
       return;
     }
 
     const head = options?.head ?? null;
-    const proxy = measureBodyProxy(pose, head, width, height, options?.anchors ?? assetAnchors);
+    const resolvedAnchors = options?.anchors ?? assetAnchors;
+    const proxy = measureBodyProxy(pose, head, width, height, {
+      shoulderWidth: modelAnchors.shoulderWidth,
+      torsoHeight: modelAnchors.torsoHeight,
+      hemY: resolvedAnchors?.hemY ?? hemY,
+    });
     const confidence = options?.confidence ?? proxy?.poseConfidence ?? 0;
     // Soft fade is applied via CSS on the canvas; hide only when tracking is unusable.
-    if (!proxy || confidence < 0.18) {
+    if (!proxy) {
       garmentGroup.visible = false;
       prevArmQuats.clear();
-      renderer.render(scene, camera);
+      anchorResiduals = [];
+      finishRender(width, height, "calibration_failed");
+      return;
+    }
+    if (confidence < 0.18) {
+      garmentGroup.visible = false;
+      prevArmQuats.clear();
+      anchorResiduals = [];
+      finishRender(width, height, "low_confidence");
       return;
     }
 
-    const leftShoulder = screenToWorld(pose.leftShoulder.x, pose.leftShoulder.y, width, height);
-    const rightShoulder = screenToWorld(pose.rightShoulder.x, pose.rightShoulder.y, width, height);
-    const leftElbow = screenToWorld(pose.leftElbow.x, pose.leftElbow.y, width, height);
-    const rightElbow = screenToWorld(pose.rightElbow.x, pose.rightElbow.y, width, height);
-    const leftWrist = screenToWorld(pose.leftWrist.x, pose.leftWrist.y, width, height);
-    const rightWrist = screenToWorld(pose.rightWrist.x, pose.rightWrist.y, width, height);
-    const leftHip = screenToWorld(pose.leftHip.x, pose.leftHip.y, width, height);
-    const rightHip = screenToWorld(pose.rightHip.x, pose.rightHip.y, width, height);
+    const bodyFrame = buildBodyFrame(pose);
+    const shoulderZ = Math.abs((pose.world.leftShoulder.z ?? 0) - (pose.world.rightShoulder.z ?? 0));
+    const fit = computeAnchorFit(pose, modelAnchors, width, height, shoulderZ);
+    if (!fit || !bodyFrame) {
+      garmentGroup.visible = false;
+      prevArmQuats.clear();
+      anchorResiduals = [];
+      finishRender(width, height, "calibration_failed");
+      return;
+    }
+    anchorResiduals = fit.residuals;
+
+    const leftShoulder = screenToWorld(pose.leftShoulder.x, pose.leftShoulder.y, width, height, 0);
+    const rightShoulder = screenToWorld(pose.rightShoulder.x, pose.rightShoulder.y, width, height, 0);
+    const leftHip = screenToWorld(pose.leftHip.x, pose.leftHip.y, width, height, 0);
+    const rightHip = screenToWorld(pose.rightHip.x, pose.rightHip.y, width, height, 0);
+    const neckDepth = bodyFrame
+      ? depthScaleFromWorldZ(((pose.world.leftShoulder.z + pose.world.rightShoulder.z) * 0.5), bodyFrame, width)
+      : 0;
+    const neckOrtho = screenToWorld(proxy.neckAnchor.x, proxy.neckAnchor.y, width, height, neckDepth);
 
     const shoulderMid = leftShoulder.clone().add(rightShoulder).multiplyScalar(0.5);
     const hipMid = leftHip.clone().add(rightHip).multiplyScalar(0.5);
-    const torsoMid = shoulderMid.clone().add(hipMid).multiplyScalar(0.5);
 
     resetBones();
-    const { scaleX, scaleY, scaleZ } = proxy;
+    const segments = options?.segmentScales ?? { upperL: 1, upperR: 1, forearmL: 1, forearmR: 1 };
+    garment.bones.get("upper_arm.L")!.scale.setScalar(segments.upperL);
+    garment.bones.get("upper_arm.R")!.scale.setScalar(segments.upperR);
+    garment.bones.get("forearm.L")!.scale.setScalar(segments.forearmL);
+    garment.bones.get("forearm.R")!.scale.setScalar(segments.forearmR);
+    const { scaleX, scaleY, scaleZ } = fit;
     const shoulderRoll = Math.atan2(rightShoulder.y - leftShoulder.y, rightShoulder.x - leftShoulder.x);
     const torsoLean = Math.atan2(shoulderMid.x - hipMid.x, shoulderMid.y - hipMid.y);
     const yaw = THREE.MathUtils.clamp((pose.world.leftShoulder.z - pose.world.rightShoulder.z) * 1.2, -0.35, 0.35);
 
     garmentGroup.visible = true;
-    garmentGroup.position.copy(torsoMid);
+    garmentGroup.position.set(fit.position.x, fit.position.y, fit.position.z);
     garmentGroup.scale.set(scaleX, scaleY, scaleZ);
     garmentGroup.rotation.set(0, yaw, THREE.MathUtils.clamp(shoulderRoll * 0.85 + torsoLean * 0.2, -0.4, 0.4));
     garmentGroup.updateMatrixWorld(true);
@@ -415,21 +583,29 @@ export async function createGarment3DRenderer(
       return local;
     };
 
-    const localLeftElbow = toLocal(leftElbow);
-    const localRightElbow = toLocal(rightElbow);
-    const localLeftWrist = toLocal(leftWrist);
-    const localRightWrist = toLocal(rightWrist);
-    const localNeck = toLocal(screenToWorld(proxy.neckAnchor.x, proxy.neckAnchor.y, width, height));
+    const localNeck = toLocal(neckOrtho);
+    garment.root.position.set(fit.rootOffset.x, fit.rootOffset.y, fit.rootOffset.z);
 
-    garment.root.position.set(0, 0, 0);
+    const leftArm = armTargetsFromWorld(
+      pose,
+      "L",
+      modelAnchors.shoulderL,
+      modelAnchors.upperArmLengthL * segments.upperL,
+      modelAnchors.forearmLengthL * segments.forearmL,
+      bodyFrame,
+    );
+    const rightArm = armTargetsFromWorld(
+      pose,
+      "R",
+      modelAnchors.shoulderR,
+      modelAnchors.upperArmLengthR * segments.upperR,
+      modelAnchors.forearmLengthR * segments.forearmR,
+      bodyFrame,
+    );
 
-    // Raised arms: keep shoulders locked to bind and damp torso twist so the chest does not tear.
-    const leftRaise = THREE.MathUtils.clamp((localLeftElbow.y - bindShoulderRoot.L.y) / 0.45, 0, 1);
-    const rightRaise = THREE.MathUtils.clamp((localRightElbow.y - bindShoulderRoot.R.y) / 0.45, 0, 1);
-    const raiseDamp = 1 - 0.55 * Math.max(leftRaise, rightRaise);
-
-    garment.bones.get("chest")!.rotation.z = THREE.MathUtils.clamp((shoulderRoll * 0.35 + torsoLean * 0.15) * raiseDamp, -0.18, 0.18);
-    garment.bones.get("spine")!.rotation.z = THREE.MathUtils.clamp(torsoLean * 0.18 * raiseDamp, -0.14, 0.14);
+    // Roll and yaw stay on the garment group only. Chest and spine do not repeat them.
+    garment.bones.get("chest")!.rotation.z = 0;
+    garment.bones.get("spine")!.rotation.z = 0;
     garment.bones.get("shoulder.L")!.position.copy(bindPositions.get(garment.bones.get("shoulder.L")!)!);
     garment.bones.get("shoulder.R")!.position.copy(bindPositions.get(garment.bones.get("shoulder.R")!)!);
 
@@ -443,24 +619,44 @@ export async function createGarment3DRenderer(
       const yawNeck = THREE.MathUtils.clamp(Math.atan2(aim.x, Math.max(0.05, aim.y)) * 0.4, -0.32, 0.32);
       neck.position.copy(neckBind);
       neck.rotation.set(pitch, 0, yawNeck);
-      chest.rotation.x = THREE.MathUtils.clamp(pitch * 0.25, -0.12, 0.1);
+      chest.rotation.x = 0;
     }
 
-    // Upper arms aim from bind shoulder sockets toward tracked elbows (keeps sleeves attached).
-    if ((pose.leftShoulder.visibility ?? 1) > 0.3 && (pose.leftElbow.visibility ?? 1) > 0.3) {
-      orientBone("upper_arm.L", "shoulder.L", bindShoulderRoot.L, localLeftElbow);
+    // Connected chain: forearm aims from model elbow (after upper arm target), not screen-flattened elbow.
+    if (leftArm && (pose.leftShoulder.visibility ?? 1) > 0.3 && (pose.leftElbow.visibility ?? 1) > 0.3) {
+      orientBone(
+        "upper_arm.L",
+        "shoulder.L",
+        bindShoulderRoot.L,
+        new THREE.Vector3(leftArm.elbow.x, leftArm.elbow.y, leftArm.elbow.z),
+      );
     }
-    if ((pose.leftElbow.visibility ?? 1) > 0.3 && (pose.leftWrist.visibility ?? 1) > 0.3) {
-      orientBone("forearm.L", "upper_arm.L", localLeftElbow, localLeftWrist);
+    if (leftArm && (pose.leftElbow.visibility ?? 1) > 0.3 && (pose.leftWrist.visibility ?? 1) > 0.3) {
+      orientBone(
+        "forearm.L",
+        "upper_arm.L",
+        new THREE.Vector3(leftArm.elbow.x, leftArm.elbow.y, leftArm.elbow.z),
+        new THREE.Vector3(leftArm.wrist.x, leftArm.wrist.y, leftArm.wrist.z),
+      );
     }
-    if ((pose.rightShoulder.visibility ?? 1) > 0.3 && (pose.rightElbow.visibility ?? 1) > 0.3) {
-      orientBone("upper_arm.R", "shoulder.R", bindShoulderRoot.R, localRightElbow);
+    if (rightArm && (pose.rightShoulder.visibility ?? 1) > 0.3 && (pose.rightElbow.visibility ?? 1) > 0.3) {
+      orientBone(
+        "upper_arm.R",
+        "shoulder.R",
+        bindShoulderRoot.R,
+        new THREE.Vector3(rightArm.elbow.x, rightArm.elbow.y, rightArm.elbow.z),
+      );
     }
-    if ((pose.rightElbow.visibility ?? 1) > 0.3 && (pose.rightWrist.visibility ?? 1) > 0.3) {
-      orientBone("forearm.R", "upper_arm.R", localRightElbow, localRightWrist);
+    if (rightArm && (pose.rightElbow.visibility ?? 1) > 0.3 && (pose.rightWrist.visibility ?? 1) > 0.3) {
+      orientBone(
+        "forearm.R",
+        "upper_arm.R",
+        new THREE.Vector3(rightArm.elbow.x, rightArm.elbow.y, rightArm.elbow.z),
+        new THREE.Vector3(rightArm.wrist.x, rightArm.wrist.y, rightArm.wrist.z),
+      );
     }
-    applyArmSlerp();
-    renderer.render(scene, camera);
+    applyArmSlerp(options?.dtSeconds ?? 1 / 30);
+    finishRender(width, height, "none");
   };
 
   return {
@@ -468,6 +664,23 @@ export async function createGarment3DRenderer(
     rotateInspect,
     updatePose,
     resetInspect() { inspectRotation = { x: -0.04, y: -0.32 }; },
+    getAssetInfo() {
+      return { ...assetInfo };
+    },
+    getDebugFrame() {
+      return {
+        hideReason,
+        lastRenderMs,
+        modelJoints: modelJoints.slice(),
+        asset: { ...assetInfo },
+        anchorResiduals: anchorResiduals.slice(),
+        modelAnchors: { ...modelAnchors },
+      };
+    },
+    setSkeletonOnly(enabled: boolean) {
+      skeletonOnly = enabled;
+      applySkeletonOnlyVisibility();
+    },
     dispose() {
       if (disposed) return;
       disposed = true;

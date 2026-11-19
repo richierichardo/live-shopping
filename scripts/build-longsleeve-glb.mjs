@@ -95,6 +95,28 @@ function skinForTorsoY(y, index) {
   return setSkin(chest, neck, THREE.MathUtils.smoothstep(y, 0.34, 0.52) * 0.18);
 }
 
+function torsoVertexSkin(x, y, index) {
+  const base = skinForTorsoY(y, index);
+  if (y < 0.2 || y > 0.5) return base;
+  const absX = Math.abs(x);
+  if (absX < 0.2) return base;
+  const chest = index.get("chest");
+  const shoulder = index.get(x < 0 ? "shoulder.L" : "shoulder.R");
+  return setSkin(chest, shoulder, THREE.MathUtils.smoothstep(absX, 0.2, 0.38));
+}
+
+function sleeveSkin(t, side, index) {
+  const chest = index.get("chest");
+  const shoulder = index.get(`shoulder.${side}`);
+  const upper = index.get(`upper_arm.${side}`);
+  const forearm = index.get(`forearm.${side}`);
+  if (t < 0.16) return setSkin(chest, shoulder, THREE.MathUtils.smoothstep(t, 0, 0.16));
+  if (t < 0.34) return setSkin(shoulder, upper, THREE.MathUtils.smoothstep(t, 0.16, 0.34));
+  if (t < 0.46) return setSkin(upper);
+  if (t < 0.74) return setSkin(upper, forearm, THREE.MathUtils.smoothstep(t, 0.46, 0.74));
+  return setSkin(forearm);
+}
+
 function geometryFromRings(rings, ringSegments) {
   const positions = [];
   const uvs = [];
@@ -109,8 +131,9 @@ function geometryFromRings(rings, ringSegments) {
         .addScaledVector(ring.depth, Math.cos(angle) * ring.depthRadius);
       positions.push(point.x, point.y, point.z);
       uvs.push((segment / ringSegments + 0.5) % 1, ring.v);
-      skinIndices.push(...ring.skin.indices);
-      skinWeights.push(...ring.skin.weights);
+      const skin = ring.skinAt ? ring.skinAt(point) : ring.skin;
+      skinIndices.push(...skin.indices);
+      skinWeights.push(...skin.weights);
       if (ringIndex < rings.length - 1 && segment < ringSegments) {
         const a = ringIndex * (ringSegments + 1) + segment;
         const b = a + ringSegments + 1;
@@ -156,8 +179,8 @@ function makeTorsoGeometry(index) {
     { y: -0.1, width: 0.385, depth: 0.14 },
     { y: 0.02, width: 0.39, depth: 0.145 },
     { y: 0.14, width: 0.41, depth: 0.152 },
-    { y: 0.27, width: 0.43, depth: 0.16 },
-    { y: 0.36, width: 0.42, depth: 0.155 },
+    { y: 0.27, width: 0.43, depth: 0.175 },
+    { y: 0.36, width: 0.42, depth: 0.17 },
     { y: 0.43, width: 0.41, depth: 0.15 },
     { y: 0.48, width: 0.37, depth: 0.14 },
     { y: 0.51, width: 0.34, depth: 0.13 },
@@ -172,34 +195,28 @@ function makeTorsoGeometry(index) {
     depthRadius: item.depth,
     v: THREE.MathUtils.clamp((item.y + 0.59) / 1.1, 0, 1),
     skin: skinForTorsoY(item.y, index),
+    skinAt: (point) => torsoVertexSkin(point.x, point.y, index),
   }));
   return geometryFromRings(rings, 48);
 }
 
-function sleeveSkin(t, side, index) {
-  const chest = index.get("chest");
-  const shoulder = index.get(`shoulder.${side}`);
-  const upper = index.get(`upper_arm.${side}`);
-  const forearm = index.get(`forearm.${side}`);
-  if (t < 0.12) return setSkin(chest, shoulder, THREE.MathUtils.smoothstep(t, 0, 0.12));
-  if (t < 0.28) return setSkin(shoulder, upper, THREE.MathUtils.smoothstep(t, 0.12, 0.28));
-  if (t < 0.62) return setSkin(upper, forearm, THREE.MathUtils.smoothstep(t, 0.5, 0.64) * 0.4);
-  return setSkin(forearm);
-}
-
 function makeSleeveGeometry(side, index) {
   const sign = side === "L" ? -1 : 1;
+  const shoulder = new THREE.Vector3(sign * 0.37, 0.36, 0);
+  const elbow = shoulder.clone().add(new THREE.Vector3(sign * 0.05, -0.035, 0));
+  const forearm = elbow.clone().add(new THREE.Vector3(sign * 0.22, -0.32, 0.01));
+  const wrist = forearm.clone().add(new THREE.Vector3(sign * 0.22, -0.32, 0.01));
   const points = [
-    new THREE.Vector3(sign * 0.28, 0.4, 0.02),
-    new THREE.Vector3(sign * 0.34, 0.39, 0.01),
-    new THREE.Vector3(sign * 0.42, 0.32, 0.008),
-    new THREE.Vector3(sign * 0.52, 0.2, 0.012),
-    new THREE.Vector3(sign * 0.6, 0.06, 0.018),
-    new THREE.Vector3(sign * 0.66, -0.12, 0.024),
-    new THREE.Vector3(sign * 0.69, -0.3, 0.03),
-    new THREE.Vector3(sign * 0.71, -0.5, 0.035),
+    new THREE.Vector3(sign * 0.2, 0.3, 0.02),
+    shoulder,
+    shoulder.clone().lerp(elbow, 0.5),
+    elbow,
+    elbow.clone().lerp(forearm, 0.45),
+    forearm,
+    forearm.clone().lerp(wrist, 0.55),
+    wrist,
   ];
-  const radii = [0.16, 0.155, 0.148, 0.135, 0.12, 0.105, 0.094, 0.088];
+  const radii = [0.18, 0.17, 0.155, 0.15, 0.13, 0.115, 0.1, 0.092];
   const rings = [];
   const stepsPerSegment = 12;
   const totalSteps = stepsPerSegment * (points.length - 1);
@@ -222,7 +239,7 @@ function makeSleeveGeometry(side, index) {
       side: sideAxis,
       depth: depthAxis,
       radius,
-      depthRadius: radius * 0.82,
+      depthRadius: radius * 0.9,
       v: progress,
       skin: sleeveSkin(progress, side, index),
     });
@@ -233,14 +250,13 @@ function makeSleeveGeometry(side, index) {
 function buildGarment() {
   const root = new THREE.Group();
   root.name = "garment_root";
-  const { index, skeleton } = createSkeleton(root);
-  // Solid materials only — Node GLTFExporter cannot embed DataTexture without DOM canvas.
-  // Runtime applies Retro Racing canvas maps after load.
+  const { bones, index, skeleton } = createSkeleton(root);
+  // Solid light cloth. Runtime replaces maps and keeps material.color white.
   const clothMaterial = new THREE.MeshStandardMaterial({
-    color: 0x171717, roughness: 0.88, metalness: 0.02, side: THREE.DoubleSide,
+    color: 0xd8d4cc, roughness: 0.88, metalness: 0.02, side: THREE.DoubleSide,
   });
   const sleeveMaterial = new THREE.MeshStandardMaterial({
-    color: 0x1a1a18, roughness: 0.88, metalness: 0.02, side: THREE.DoubleSide,
+    color: 0xd8d4cc, roughness: 0.88, metalness: 0.02, side: THREE.DoubleSide,
   });
 
   const meshes = [];
@@ -266,12 +282,12 @@ function buildGarment() {
 
   const collar = new THREE.Mesh(
     new THREE.TorusGeometry(0.125, 0.02, 12, 48),
-    new THREE.MeshStandardMaterial({ color: 0x111210, roughness: 0.86 }),
+    new THREE.MeshStandardMaterial({ color: 0xd8d4cc, roughness: 0.86 }),
   );
   collar.name = "collar";
-  collar.position.set(0, 0.49, 0);
+  collar.position.set(0, 0.07, 0);
   collar.rotation.x = Math.PI / 2;
-  root.add(collar);
+  bones.get("neck").add(collar);
   root.updateMatrixWorld(true);
   return root;
 }
