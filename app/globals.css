@@ -251,6 +251,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .camera-placeholder p { max-width: 300px; color: #b4afa6; font-size: 10px; }
 .camera-stage-top, .camera-stage-bottom { position: absolute; z-index: 5; right: 14px; left: 14px; display: flex; justify-content: space-between; color: white; font-size: 8px; font-weight: 800; letter-spacing: .14em; pointer-events: none; }
 .camera-stage-top { top: 14px; }
+.landmark-legend { position: absolute; z-index: 6; top: 36px; left: 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; max-width: min(280px, calc(100% - 150px)); color: #f4f0e8; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; pointer-events: none; }
+.landmark-swatch { width: 8px; height: 8px; border-radius: 50%; background: #6cf2d1; }
+.landmark-swatch.skeleton { background: #ff7a59; }
+.landmark-swatch.error { width: 12px; height: 2px; border-radius: 1px; background: #f2d56e; }
+.landmark-held-key { color: #9f9a90; letter-spacing: .04em; }
+.landmark-status { position: absolute; z-index: 6; left: 12px; bottom: 42px; display: grid; gap: 4px; max-width: min(340px, calc(100% - 24px)); padding: 8px; border: 1px solid #ffffff33; background: #11110fe6; color: #f4f0e8; font-size: 9px; line-height: 1.35; pointer-events: auto; }
+.landmark-status p { margin: 0; }
+.landmark-status strong { letter-spacing: .08em; text-transform: uppercase; }
 .camera-stage-bottom { bottom: 14px; color: #f1eadb; text-shadow: 0 1px 3px #000; }
 .tryon-debug-controls { position: absolute; z-index: 6; top: 36px; right: 12px; display: flex; gap: 6px; }
 .debug-toggle { padding: 7px 9px; border: 1px solid #ffffff55; background: #11110fbf; color: white; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; cursor: pointer; }

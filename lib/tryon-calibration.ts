@@ -104,8 +104,10 @@ export type ProportionCalibrator = {
 
 export function createProportionCalibrator(): ProportionCalibrator {
   let samples: ProportionSample[] = [];
+  let locked: ProportionRatios | null = null;
   return {
     push(sample) {
+      if (locked) return;
       if (
         sample.shoulderPx < 12
         || sample.torsoPx < 14
@@ -116,11 +118,15 @@ export function createProportionCalibrator(): ProportionCalibrator {
       samples = samples.filter((item) => newest - item.at <= CALIBRATION_WINDOW_MS + 200);
     },
     current(model, now) {
+      if (locked) return locked;
       const ratios = ratiosFromSamples(samples, model, now);
-      return ratios.ready ? ratios : { ...IDENTITY_RATIOS, hipWidthPx: ratios.hipWidthPx };
+      if (!ratios.ready) return { ...IDENTITY_RATIOS, hipWidthPx: ratios.hipWidthPx };
+      locked = ratios;
+      return locked;
     },
     reset() {
       samples = [];
+      locked = null;
     },
   };
 }

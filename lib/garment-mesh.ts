@@ -441,6 +441,18 @@ export function assignGarmentMap(material: THREE.MeshStandardMaterial, map: THRE
   material.needsUpdate = true;
 }
 
+/** Flat product color for the volume gate. No catalog print and no canvas texture. */
+export function applySolidGarmentColor(material: THREE.MeshStandardMaterial, color: string) {
+  const previous = material.map;
+  material.map = null;
+  material.color.set(color);
+  material.roughness = 0.88;
+  material.metalness = 0.02;
+  material.side = THREE.DoubleSide;
+  material.needsUpdate = true;
+  previous?.dispose();
+}
+
 function makeSkinnedMesh(geometry: THREE.BufferGeometry, material: THREE.Material) {
   const mesh = new THREE.SkinnedMesh(geometry, material);
   mesh.frustumCulled = false;
@@ -452,17 +464,22 @@ function makeSkinnedMesh(geometry: THREE.BufferGeometry, material: THREE.Materia
 export function buildGarment(
   productName: string,
   color: string,
-  options: { useDataTextures?: boolean; sleeveLength?: "long" | "short"; torsoMap?: THREE.Texture } = {},
+  options: { useDataTextures?: boolean; sleeveLength?: "long" | "short"; torsoMap?: THREE.Texture; solidColor?: boolean } = {},
 ): BuiltGarment {
   const root = new THREE.Group();
   root.name = "garment_root";
   const { bones, index, skeleton } = createSkeleton(root);
   const sleeveLength = options.sleeveLength ?? "long";
-  const torsoTexture = options.torsoMap
-    ?? (options.useDataTextures ? makeBodyDataTexture(productName, color) : makeBodyTexture(productName, color));
-  const sleeveTexture = options.useDataTextures
-    ? makeSleeveDataTexture(color)
-    : makeSleeveTexture(color);
+  const solid = options.solidColor === true;
+  const torsoTexture = solid
+    ? null
+    : options.torsoMap
+      ?? (options.useDataTextures ? makeBodyDataTexture(productName, color) : makeBodyTexture(productName, color));
+  const sleeveTexture = solid
+    ? null
+    : options.useDataTextures
+      ? makeSleeveDataTexture(color)
+      : makeSleeveTexture(color);
   const clothMaterial = new THREE.MeshStandardMaterial({
     map: torsoTexture,
     color: 0xffffff,
@@ -477,6 +494,10 @@ export function buildGarment(
     metalness: 0.02,
     side: THREE.DoubleSide,
   });
+  if (solid) {
+    applySolidGarmentColor(clothMaterial, color);
+    applySolidGarmentColor(sleeveMaterial, color);
+  }
   const meshes: THREE.SkinnedMesh[] = [];
 
   const torso = makeSkinnedMesh(makeTorsoGeometry(index), clothMaterial);
@@ -493,14 +514,14 @@ export function buildGarment(
   meshes.push(sleeveRight);
   meshes.forEach((mesh) => mesh.bind(skeleton));
 
-  const collar = new THREE.Mesh(
-    new THREE.TorusGeometry(0.125, 0.02, 12, 48),
-    new THREE.MeshStandardMaterial({ color: 0xd8d4cc, roughness: 0.86 }),
-  );
+  const collarMaterial = new THREE.MeshStandardMaterial({ roughness: 0.88, side: THREE.DoubleSide });
+  applySolidGarmentColor(collarMaterial, color);
+  const collar = new THREE.Mesh(new THREE.TorusGeometry(0.125, 0.02, 12, 48), collarMaterial);
   collar.name = "collar";
   collar.position.set(0, 0.07, 0);
   collar.rotation.x = Math.PI / 2;
   bones.get("neck")!.add(collar);
   root.updateMatrixWorld(true);
-  return { root, bones, skeleton, meshes, textures: [torsoTexture, sleeveTexture], collar };
+  const textures = [torsoTexture, sleeveTexture].filter((texture): texture is THREE.Texture => texture != null);
+  return { root, bones, skeleton, meshes, textures, collar };
 }

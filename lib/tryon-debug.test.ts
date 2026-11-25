@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  acceptsCalibrationSample,
   cameraLandmarksFromPose,
   createTryOnDebugMeter,
   emptyDebugSnapshot,
@@ -7,6 +8,7 @@ import {
   formatMs,
   isTryOnDebugQueryEnabled,
   jointConfidenceFromPose,
+  nextPoseAcceptedAt,
   snapshotFromMeter,
 } from "./tryon-debug";
 
@@ -62,5 +64,23 @@ describe("tryon-debug", () => {
     expect(formatMs(12.34)).toBe("12.3ms");
     expect(formatConf(0.42)).toBe("42%");
     expect(emptyDebugSnapshot().hideReason).toBe("inactive");
+  });
+
+  it("keeps pose age growing while a held frame stays out of calibration", () => {
+    expect(nextPoseAcceptedAt(1000, 1800, "none")).toBe(1800);
+    expect(nextPoseAcceptedAt(1000, 1800, "pose_held")).toBe(1000);
+    expect(nextPoseAcceptedAt(1000, 1800, "low_confidence")).toBe(1000);
+    expect(nextPoseAcceptedAt(1000, 1800, "calibration_failed")).toBe(1000);
+    expect(acceptsCalibrationSample("none")).toBe(true);
+    expect(acceptsCalibrationSample("pose_held")).toBe(false);
+    expect(acceptsCalibrationSample("calibration_failed")).toBe(false);
+    expect(acceptsCalibrationSample("low_confidence")).toBe(false);
+
+    const meter = createTryOnDebugMeter();
+    meter.hideReason = "pose_held";
+    meter.lastPoseAcceptedAt = nextPoseAcceptedAt(1000, 1800, "pose_held");
+    expect(snapshotFromMeter(meter, 1800).poseAgeMs).toBe(800);
+    meter.lastPoseAcceptedAt = nextPoseAcceptedAt(meter.lastPoseAcceptedAt, 2600, "pose_held");
+    expect(snapshotFromMeter(meter, 2600).poseAgeMs).toBe(1600);
   });
 });

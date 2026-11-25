@@ -22,7 +22,7 @@ describe("tryon-anchors", () => {
     expect(model.hem.y).toBe(-0.52);
   });
 
-  it("fits frontal synthetic pose with finite residuals and hem-aware root offset", () => {
+  it("fits a frontal synthetic pose with finite shoulder and pelvis residuals", () => {
     const pose = {
       leftShoulder: { x: 140, y: 90, visibility: 1 },
       rightShoulder: { x: 260, y: 92, visibility: 1 },
@@ -42,7 +42,7 @@ describe("tryon-anchors", () => {
     expect(shoulderResidual!.errorPx).toBeLessThan(80);
   });
 
-  it("changes vertical root offset when hemY changes", () => {
+  it("keeps shoulder and pelvis anchors when hemY changes", () => {
     const shallowHem = buildModelAnchors({
       shoulderL: model.shoulderL,
       shoulderR: model.shoulderR,
@@ -62,6 +62,14 @@ describe("tryon-anchors", () => {
     };
     const a = computeAnchorFit(pose, model, 400, 360)!;
     const b = computeAnchorFit(pose, shallowHem, 400, 360)!;
-    expect(Math.abs(a.rootOffset.y - b.rootOffset.y)).toBeGreaterThan(0.01);
+    expect(a.rootOffset.y).toBeCloseTo(b.rootOffset.y, 6);
+    expect(a.rootOffset.x).toBeCloseTo(b.rootOffset.x, 6);
+    const shoulderA = a.residuals.find((item) => item.label === "shoulder.L")!;
+    const shoulderB = b.residuals.find((item) => item.label === "shoulder.L")!;
+    const pelvisA = a.residuals.find((item) => item.label === "pelvis")!;
+    const pelvisB = b.residuals.find((item) => item.label === "pelvis")!;
+    expect(shoulderA.modelY).toBeCloseTo(shoulderB.modelY, 4);
+    expect(pelvisA.modelY).toBeCloseTo(pelvisB.modelY, 4);
+    expect(shallowHem.hem.y).toBe(-0.2);
   });
 });

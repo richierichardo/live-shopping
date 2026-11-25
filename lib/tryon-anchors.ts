@@ -28,6 +28,8 @@ export type AnchorResidual = {
   modelX: number;
   modelY: number;
   errorPx: number;
+  /** errorPx as a percent of the camera shoulder span. */
+  errorPct: number;
 };
 
 export type AnchorFitResult = {
@@ -88,7 +90,7 @@ export function buildModelAnchors(input: {
 
 /**
  * Fit garment position/scale from screen shoulders + hips against model anchors.
- * Uses hemY (via model.hem) for vertical root offset — no longer unused.
+ * hem stays on the model record for a later garment pass. It does not move the shoulder or pelvis.
  */
 export function computeAnchorFit(
   pose: {
@@ -143,11 +145,9 @@ export function computeAnchorFit(
 
   const bindShoulderMid = mid(model.shoulderL, model.shoulderR);
   const bindTorsoMid = mid(bindShoulderMid, model.pelvis);
-  // Place bind torso mid at group origin; hemY shifts root so hem participates in vertical fit.
-  const hemDeltaY = model.hem.y - model.pelvis.y;
   const rootOffset: Vec3 = {
     x: -bindTorsoMid.x,
-    y: -bindTorsoMid.y + hemDeltaY * 0.35,
+    y: -bindTorsoMid.y,
     z: -bindTorsoMid.z,
   };
 
@@ -168,13 +168,15 @@ export function computeAnchorFit(
 
   const residuals: AnchorResidual[] = pairs.map(({ label, camera, local }) => {
     const projected = projectModel(local);
+    const errorPx = Math.hypot(projected.x - camera.x, projected.y - camera.y);
     return {
       label,
       cameraX: camera.x,
       cameraY: camera.y,
       modelX: projected.x,
       modelY: projected.y,
-      errorPx: Math.hypot(projected.x - camera.x, projected.y - camera.y),
+      errorPx,
+      errorPct: (errorPx / Math.max(screenShoulder, 1e-4)) * 100,
     };
   });
 

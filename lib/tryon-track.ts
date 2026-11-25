@@ -2,6 +2,25 @@
 
 export type TrackingState = "acquiring" | "tracking" | "degraded" | "lost";
 
+export type TrackingReason = "hip_filled" | "arm_held" | "torso_held" | "lost_timeout" | "no_shoulders";
+
+export type HeldJoint =
+  | "leftShoulder"
+  | "rightShoulder"
+  | "leftElbow"
+  | "rightElbow"
+  | "leftWrist"
+  | "rightWrist"
+  | "leftHip"
+  | "rightHip";
+
+const ALL_HELD_JOINTS: HeldJoint[] = [
+  "leftShoulder", "rightShoulder",
+  "leftElbow", "rightElbow",
+  "leftWrist", "rightWrist",
+  "leftHip", "rightHip",
+];
+
 export const HOLD_MS = 400;
 export const LOST_MS = 500;
 export const SHOULDER_VIS_MIN = 0.45;
@@ -44,6 +63,10 @@ export type TrackStep = {
   memory: TrackMemory;
   pose: TrackPose | null;
   state: TrackingState;
+  /** Why the pose is not a fresh observation. Empty while tracking or acquiring on a live torso. */
+  reasons: TrackingReason[];
+  /** Joints copied or synthesized from an older pose. */
+  heldJoints: HeldJoint[];
 };
 
 export function createTrackMemory(): TrackMemory {
@@ -141,6 +164,8 @@ export function stepTracking(
 
   if (raw && shouldersOk(raw) && (vis(raw.leftHip) >= HIP_VIS_MIN || vis(raw.rightHip) >= HIP_VIS_MIN)) {
     const pose = clonePose(raw);
+    const reasons: TrackingReason[] = [];
+    const heldJoints: HeldJoint[] = [];
     let degraded = false;
     const shoulderSpan = Math.abs(pose.rightShoulder.x - pose.leftShoulder.x);
     const fallbackHip = next.hipWidthPx > 8 ? next.hipWidthPx : shoulderSpan * MODEL_HIP_TO_SHOULDER;
@@ -148,9 +173,13 @@ export function stepTracking(
     if (vis(pose.leftHip) < HIP_VIS_MIN && vis(pose.rightHip) >= HIP_VIS_MIN) {
       fillHip(pose, "left", fallbackHip);
       degraded = true;
+      reasons.push("hip_filled");
+      heldJoints.push("leftHip");
     } else if (vis(pose.rightHip) < HIP_VIS_MIN && vis(pose.leftHip) >= HIP_VIS_MIN) {
       fillHip(pose, "right", fallbackHip);
       degraded = true;
+      reasons.push("hip_filled");
+      heldJoints.push("rightHip");
     } else if (vis(pose.leftHip) >= HIP_VIS_MIN && vis(pose.rightHip) >= HIP_VIS_MIN) {
       next.hipWidthPx = Math.abs(pose.rightHip.x - pose.leftHip.x);
     }
@@ -169,6 +198,8 @@ export function stepTracking(
         copyJoint(pose, memory.lastPose, elbowKey);
         copyJoint(pose, memory.lastPose, wristKey);
         degraded = true;
+        if (!reasons.includes("arm_held")) reasons.push("arm_held");
+        heldJoints.push(elbowKey, wristKey);
       }
     };
     holdArm("L");
@@ -177,14 +208,14 @@ export function stepTracking(
     next.lastGoodTorsoAt = now;
     next.lastPose = pose;
     const state: TrackingState = degraded ? "degraded" : calibrationReady ? "tracking" : "acquiring";
-    return { memory: next, pose, state };
+    return { memory: next, pose, state, reasons, heldJoints };
   }
 
   if (next.lastGoodTorsoAt != null && now - next.lastGoodTorsoAt <= LOST_MS) {
-    return { memory: next, pose: next.lastPose, state: "degraded" };
+    return { memory: next, pose: next.lastPose, state: "degraded", reasons: ["torso_held"], heldJoints: [...ALL_HELD_JOINTS] };
   }
   if (next.lastGoodTorsoAt != null) {
-    return { memory: next, pose: next.lastPose, state: "lost" };
+    return { memory: next, pose: next.lastPose, state: "lost", reasons: ["lost_timeout"], heldJoints: [...ALL_HELD_JOINTS] };
   }
-  return { memory: next, pose: null, state: "acquiring" };
+  return { memory: next, pose: null, state: "acquiring", reasons: ["no_shoulders"], heldJoints: [] };
 }

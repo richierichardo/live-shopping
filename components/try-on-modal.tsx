@@ -10,16 +10,19 @@ import {
   createProportionCalibrator,
   worldLength,
   type ProportionRatios,
+  type ProportionSample,
   IDENTITY_RATIOS,
 } from "@/lib/tryon-calibration";
 import {
   createTrackMemory,
   dtAlpha,
   stepTracking,
+  type HeldJoint,
   type TrackMemory,
   type TrackingState,
 } from "@/lib/tryon-track";
 import {
+  acceptsCalibrationSample,
   cameraLandmarksFromPose,
   createTryOnDebugMeter,
   emptyDebugSnapshot,
@@ -27,6 +30,7 @@ import {
   formatMs,
   isTryOnDebugQueryEnabled,
   jointConfidenceFromPose,
+  nextPoseAcceptedAt,
   snapshotFromMeter,
   type TryOnDebugSnapshot,
   type TryOnDelegate,
@@ -121,9 +125,11 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
   const calibratorRef = useRef(createProportionCalibrator());
   const trackMemoryRef = useRef<TrackMemory>(createTrackMemory());
   const trackingStateRef = useRef<TrackingState>("acquiring");
+  const heldJointsRef = useRef<HeldJoint[]>([]);
   const ratiosRef = useRef<ProportionRatios>({ ...IDENTITY_RATIOS });
   const lastSmoothAtRef = useRef(0);
   const lastRenderAtRef = useRef(0);
+  const pendingCalibrationRef = useRef<ProportionSample | null>(null);
   const showPoseOverlayRef = useRef(showPoseOverlay);
   const debugPanelOpenRef = useRef(debugPanelOpen);
   const skeletonOnlyRef = useRef(skeletonOnly);
@@ -178,6 +184,7 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
     }
     const garment = garmentCanvasRef.current;
     if (garment) garment.style.removeProperty("opacity");
+    garmentRendererRef.current?.setHideGarment(false);
     poseConfidenceRef.current = 0;
     const renderer = garmentRendererRef.current;
     const bounds = stageRef.current?.getBoundingClientRect();
@@ -343,7 +350,6 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
   };
 
   const paintModelSkeletonOverlay = (width: number, height: number) => {
-    if (!(showPoseOverlayRef.current || debugPanelOpenRef.current || skeletonOnlyRef.current)) return;
     const overlay = overlayCanvasRef.current;
     const overCtx = overlay?.getContext("2d");
     const debugFrame = garmentRendererRef.current?.getDebugFrame();
@@ -358,8 +364,8 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
       overCtx.lineWidth = 1.5;
       const byLabel = new Map(modelJoints.map((joint) => [joint.label, joint]));
       const modelPairs: [string, string][] = [
-        ["shoulder.L", "upper_arm.L"], ["upper_arm.L", "forearm.L"],
-        ["shoulder.R", "upper_arm.R"], ["upper_arm.R", "forearm.R"],
+        ["shoulder.L", "upper_arm.L"], ["upper_arm.L", "forearm.L"], ["forearm.L", "wrist.L"],
+        ["shoulder.R", "upper_arm.R"], ["upper_arm.R", "forearm.R"], ["forearm.R", "wrist.R"],
         ["shoulder.L", "shoulder.R"], ["pelvis", "spine"], ["spine", "chest"], ["chest", "neck"],
       ];
       for (const [aName, bName] of modelPairs) {
@@ -379,8 +385,8 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
     }
     const residuals = debugFrame?.anchorResiduals ?? [];
     if (residuals.length > 0) {
-      overCtx.strokeStyle = "#7ec8ff";
-      overCtx.fillStyle = "#7ec8ff";
+      overCtx.strokeStyle = "#f2d56e";
+      overCtx.fillStyle = "#f2d56e";
       overCtx.lineWidth = 1;
       overCtx.font = "700 9px Arial";
       for (const residual of residuals) {
@@ -388,10 +394,11 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
         overCtx.moveTo(residual.cameraX, residual.cameraY);
         overCtx.lineTo(residual.modelX, residual.modelY);
         overCtx.stroke();
-        overCtx.beginPath();
-        overCtx.arc(residual.modelX, residual.modelY, 4, 0, Math.PI * 2);
-        overCtx.fill();
-        overCtx.fillText(`${residual.label} ${residual.errorPx.toFixed(0)}px`, residual.modelX + 6, residual.modelY - 6);
+        overCtx.fillText(
+          `${residual.label} ${residual.errorPx.toFixed(0)}px ${residual.errorPct.toFixed(0)}%`,
+          residual.modelX + 6,
+          residual.modelY - 6,
+        );
       }
     }
   };
@@ -412,6 +419,7 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
     applyLayerOpacity(layerOpacity);
 
     if (!pose || layerOpacity < 0.04) {
+      if (pose) paintCameraLandmarks(overCtx, pose, confidence);
       debugMeterRef.current.compositeMs.push(performance.now() - compositeStarted);
       return;
     }
@@ -444,28 +452,40 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
     overCtx.drawImage(zone, 0, 0, width, height);
     overCtx.restore();
 
-    const showOverlay = showPoseOverlayRef.current || debugPanelOpenRef.current || skeletonOnlyRef.current;
-    if (showOverlay) {
-      overCtx.lineWidth = 2;
-      overCtx.strokeStyle = "#6cf2d1";
-      overCtx.fillStyle = "#ffca59";
-      const pairs: [ScreenPoint, ScreenPoint][] = [
-        [pose.leftShoulder, pose.leftElbow], [pose.leftElbow, pose.leftWrist],
-        [pose.rightShoulder, pose.rightElbow], [pose.rightElbow, pose.rightWrist],
-        [pose.leftShoulder, pose.rightShoulder], [pose.leftHip, pose.rightHip],
-      ];
-      for (const [a, b] of pairs) { overCtx.beginPath(); overCtx.moveTo(a.x, a.y); overCtx.lineTo(b.x, b.y); overCtx.stroke(); }
-      for (const key of pointKeys) {
-        const point = pose[key];
-        overCtx.beginPath(); overCtx.arc(point.x, point.y, 4, 0, Math.PI * 2); overCtx.fill();
-      }
-      overCtx.fillStyle = "#fff";
-      overCtx.font = "700 10px Arial";
-      overCtx.fillText("L", pose.leftShoulder.x - 8, pose.leftShoulder.y - 9);
-      overCtx.fillText("R", pose.rightShoulder.x + 4, pose.rightShoulder.y - 9);
-      overCtx.fillText(`conf ${(confidence * 100).toFixed(0)}%`, 10, 18);
-    }
+    paintCameraLandmarks(overCtx, pose, confidence);
     debugMeterRef.current.compositeMs.push(performance.now() - compositeStarted);
+  };
+
+  const paintCameraLandmarks = (overCtx: CanvasRenderingContext2D, pose: GarmentPose, confidence: number) => {
+    const held = new Set(heldJointsRef.current);
+    overCtx.lineWidth = 2;
+    overCtx.strokeStyle = "#6cf2d1";
+    overCtx.fillStyle = "#6cf2d1";
+    const pairs: [ScreenPoint, ScreenPoint][] = [
+      [pose.leftShoulder, pose.leftElbow], [pose.leftElbow, pose.leftWrist],
+      [pose.rightShoulder, pose.rightElbow], [pose.rightElbow, pose.rightWrist],
+      [pose.leftShoulder, pose.rightShoulder], [pose.leftHip, pose.rightHip],
+      [pose.leftShoulder, pose.leftHip], [pose.rightShoulder, pose.rightHip],
+    ];
+    for (const [a, b] of pairs) {
+      overCtx.beginPath();
+      overCtx.moveTo(a.x, a.y);
+      overCtx.lineTo(b.x, b.y);
+      overCtx.stroke();
+    }
+    overCtx.font = "700 9px Arial";
+    for (const key of pointKeys) {
+      const point = pose[key];
+      const isHeld = held.has(key);
+      overCtx.beginPath();
+      overCtx.arc(point.x, point.y, isHeld ? 6 : 4, 0, Math.PI * 2);
+      if (isHeld) overCtx.stroke();
+      else overCtx.fill();
+      if (isHeld) overCtx.fillText("held", point.x + 8, point.y - 6);
+    }
+    overCtx.fillText("L", pose.leftShoulder.x - 8, pose.leftShoulder.y - 9);
+    overCtx.fillText("R", pose.rightShoulder.x + 4, pose.rightShoulder.y - 9);
+    overCtx.fillText(`conf ${(confidence * 100).toFixed(0)}%`, 10, 18);
   };
 
   const renderFrame = () => {
@@ -490,6 +510,7 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
       const world = result.worldLandmarks?.[0] ?? landmarks;
       let rawPose: GarmentPose | null = null;
       let head: HeadPoints | null = null;
+      let calibrationSample: ProportionSample | null = null;
       if (landmarks && world && landmarks.length > 24 && world.length > 24) {
         const mapped = mapPose(landmarks, world, bounds.width, bounds.height, video);
         rawPose = mapped.pose;
@@ -506,7 +527,7 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
           && (rawPose.leftHip.visibility ?? 0) >= 0.35
           && (rawPose.rightHip.visibility ?? 0) >= 0.35
         ) {
-          calibratorRef.current.push({
+          calibrationSample = {
             at: now,
             shoulderPx,
             torsoPx,
@@ -516,17 +537,21 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
             forearmWorldL: worldLength(rawPose.world.leftElbow, rawPose.world.leftWrist),
             forearmWorldR: worldLength(rawPose.world.rightElbow, rawPose.world.rightWrist),
             hipWidthPx: Math.abs(rawPose.rightHip.x - rawPose.leftHip.x),
-          });
+          };
         }
       }
+      const tracked = stepTracking(trackMemoryRef.current, now, rawPose, ratiosRef.current.ready);
+      pendingCalibrationRef.current = calibrationSample && tracked.reasons.length === 0 && tracked.state !== "lost"
+        ? calibrationSample
+        : null;
       const modelAnchors = renderer.getDebugFrame().modelAnchors;
       const ratios = modelAnchors
         ? calibratorRef.current.current(modelAnchors, now)
         : { ...IDENTITY_RATIOS };
       ratiosRef.current = ratios;
-      const tracked = stepTracking(trackMemoryRef.current, now, rawPose, ratios.ready);
       trackMemoryRef.current = tracked.memory;
       trackingStateRef.current = tracked.state;
+      heldJointsRef.current = tracked.heldJoints;
       const pose = tracked.state === "lost" ? smoothedPoseRef.current : tracked.pose;
       const dtSeconds = lastSmoothAtRef.current > 0 ? (now - lastSmoothAtRef.current) / 1000 : 1 / 30;
       lastSmoothAtRef.current = now;
@@ -572,16 +597,17 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
         smoothedPoseRef.current = pose;
         smoothedHeadRef.current = head ?? smoothedHeadRef.current;
       }
-      if (pose && tracked.state !== "lost") meter.lastPoseAcceptedAt = now;
       meter.joints = jointConfidenceFromPose(pose);
       meter.cameraLandmarks = cameraLandmarksFromPose(pose);
       meter.trackingState = tracked.state;
+      meter.trackingReasons = tracked.reasons;
       meter.shoulderRatio = ratios.shoulder;
       meter.torsoRatio = ratios.torso;
       meter.upperArmRatio = (ratios.upperL + ratios.upperR) * 0.5;
       if (tracked.state === "lost") meter.hideReason = "tracking_lost";
-      setPoseLost(tracked.state === "lost" || tracked.state === "acquiring");
-      drawComposite(result, smoothedPoseRef.current, smoothedHeadRef.current, bounds.width, bounds.height, video, poseConfidenceRef.current);
+      setPoseLost(tracked.state === "lost" || tracked.reasons.includes("no_shoulders"));
+      const holdingShirt = Boolean(smoothedPoseRef.current) && (tracked.state === "lost" || confidence < 0.18);
+      drawComposite(result, smoothedPoseRef.current, smoothedHeadRef.current, bounds.width, bounds.height, video, holdingShirt ? 1 : poseConfidenceRef.current);
       result.segmentationMasks?.forEach((mask) => mask.close?.());
       const sample = fpsCountRef.current;
       sample.frames += 1;
@@ -600,6 +626,7 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
       confidence: poseConfidenceRef.current,
       anchors: tryOnAssetRef.current.anchors,
       skeletonOnly: skeletonOnlyRef.current,
+      hideGarment: false,
       trackingState: trackingStateRef.current,
       dtSeconds: renderDt,
       segmentScales: {
@@ -615,13 +642,29 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
     meter.hideReason = debugFrame.hideReason === "none" && !smoothedPoseRef.current
       ? "tracking_lost"
       : debugFrame.hideReason;
+    const ageReason = meter.hideReason === "none" && meter.trackingReasons.includes("torso_held")
+      ? "pose_held"
+      : meter.hideReason;
+    meter.lastPoseAcceptedAt = nextPoseAcceptedAt(meter.lastPoseAcceptedAt, now, ageReason);
+    if (acceptsCalibrationSample(meter.hideReason) && pendingCalibrationRef.current) {
+      calibratorRef.current.push(pendingCalibrationRef.current);
+    }
+    pendingCalibrationRef.current = null;
     meter.modelJoints = debugFrame.modelJoints;
     meter.assetSource = debugFrame.asset.source;
     meter.assetFallbackReason = debugFrame.asset.fallbackReason;
     meter.anchorResiduals = debugFrame.anchorResiduals.map((item) => ({
       label: item.label,
       errorPx: item.errorPx,
+      errorPct: item.errorPct,
     }));
+    meter.segmentLengths = {
+      upperL: { ...debugFrame.segmentLengths.upperL },
+      upperR: { ...debugFrame.segmentLengths.upperR },
+      forearmL: { ...debugFrame.segmentLengths.forearmL },
+      forearmR: { ...debugFrame.segmentLengths.forearmR },
+    };
+    meter.cameraProjection = debugFrame.cameraProjection;
     meter.videoSource = videoSourceRef.current;
     paintModelSkeletonOverlay(bounds.width, bounds.height);
     publishDebugSnapshot(now);
@@ -690,6 +733,7 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
         meter.assetFallbackReason = assetInfo.fallbackReason;
       }
       debugMeterRef.current = meter;
+      garmentRendererRef.current?.setHideGarment(false);
       setVideoSource(source);
       videoSourceRef.current = source;
       smoothedPoseRef.current = null;
@@ -751,6 +795,11 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
     }
   };
 
+  const resetCalibration = () => {
+    calibratorRef.current.reset();
+    ratiosRef.current = { ...IDENTITY_RATIOS };
+  };
+
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (status !== "intro" && status !== "camera-error" && status !== "tracking-error") return;
     dragRef.current = { x: event.clientX, y: event.clientY };
@@ -777,6 +826,50 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
           {showPlaceholder && <div className="camera-placeholder"><strong>{modelError ? "3D model unavailable" : status === "starting" ? "Getting the camera ready" : "Preview paused"}</strong><p>{modelError ? "WebGL could not initialize in this browser." : statusText}</p></div>}
           <div className="camera-stage-top"><span>CAM / 01</span><span className={status === "active" ? "camera-live" : "camera-idle"}>{status === "active" ? "LIVE SIM" : status === "intro" ? "3D MODEL" : "STANDBY"}</span></div>
           {status === "active" ? <div className="camera-stage-bottom"><span>Move into frame · shoulders visible</span><span>{fps} FPS · inf {debugSnapshot.inferenceFps || "–"} / rnd {debugSnapshot.renderFps || "–"}</span></div> : status === "intro" && <div className="camera-stage-bottom"><span>DRAG TO ROTATE · CAMERA OFF</span><span>LOCAL 3D MESH</span></div>}
+          {status === "active" && (
+            <div className="landmark-legend">
+              <span className="landmark-swatch" />
+              <span>Landmark kamera</span>
+              <span className="landmark-swatch skeleton" />
+              <span>Kerangka</span>
+              <span className="landmark-swatch error" />
+              <span>Selisih</span>
+              <span className="landmark-held-key">lingkaran kosong = ditahan</span>
+            </div>
+          )}
+          {status === "active" && (
+            <aside className="landmark-status" aria-live="polite">
+              <p>
+                <strong>{debugSnapshot.trackingState}</strong>
+                {" · "}
+                {debugSnapshot.hideReason === "pose_held"
+                  ? "pose_held"
+                  : debugSnapshot.trackingReasons.length > 0
+                    ? debugSnapshot.trackingReasons.join(", ")
+                    : "fresh"}
+                {" · "}
+                age {debugSnapshot.poseAgeMs < 0 ? "—" : formatMs(debugSnapshot.poseAgeMs)}
+              </p>
+              <p>
+                S {formatConf(debugSnapshot.joints.leftShoulder)}/{formatConf(debugSnapshot.joints.rightShoulder)}
+                {" · "}E {formatConf(debugSnapshot.joints.leftElbow)}/{formatConf(debugSnapshot.joints.rightElbow)}
+                {" · "}W {formatConf(debugSnapshot.joints.leftWrist)}/{formatConf(debugSnapshot.joints.rightWrist)}
+                {" · "}H {formatConf(debugSnapshot.joints.leftHip)}/{formatConf(debugSnapshot.joints.rightHip)}
+              </p>
+              <p>
+                UL {formatSegment(debugSnapshot.segmentLengths.upperL)}
+                {" · "}UR {formatSegment(debugSnapshot.segmentLengths.upperR)}
+                {" · "}FL {formatSegment(debugSnapshot.segmentLengths.forearmL)}
+                {" · "}FR {formatSegment(debugSnapshot.segmentLengths.forearmR)}
+              </p>
+              {debugSnapshot.anchorResiduals.length > 0 && (
+                <p>
+                  {debugSnapshot.anchorResiduals.map((item) => `${item.label} ${item.errorPx.toFixed(0)}px ${item.errorPct.toFixed(0)}%`).join(" · ")}
+                </p>
+              )}
+              <button type="button" className="debug-toggle" onClick={resetCalibration}>Reset calibration</button>
+            </aside>
+          )}
           {status === "active" && poseLost && <div className="pose-lost" role="status">Step back into frame · shoulders and hips need to be visible</div>}
           {assetFallbackBanner && <div className="tryon-asset-fallback" role="alert">{assetFallbackBanner}</div>}
           {status === "active" && (
@@ -798,9 +891,11 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
                 <div><dt>comp</dt><dd>{formatMs(debugSnapshot.compositeMs)}</dd></div>
                 <div><dt>render</dt><dd>{formatMs(debugSnapshot.renderMs)}</dd></div>
                 <div><dt>pose age</dt><dd>{debugSnapshot.poseAgeMs < 0 ? "—" : formatMs(debugSnapshot.poseAgeMs)}</dd></div>
+                <div><dt>camera</dt><dd>{debugSnapshot.cameraProjection}</dd></div>
                 <div><dt>delegate</dt><dd>{debugSnapshot.delegate}</dd></div>
                 <div><dt>asset</dt><dd>{debugSnapshot.assetSource}</dd></div>
                 <div><dt>track</dt><dd>{debugSnapshot.trackingState}</dd></div>
+                <div><dt>reason</dt><dd>{debugSnapshot.hideReason === "pose_held" ? "pose_held" : debugSnapshot.trackingReasons.length > 0 ? debugSnapshot.trackingReasons.join(", ") : "fresh"}</dd></div>
                 <div><dt>hide</dt><dd>{debugSnapshot.hideReason}</dd></div>
               </dl>
               <p className="tryon-debug-joints">
@@ -837,7 +932,7 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
               {debugSnapshot.anchorResiduals.length > 0 && (
                 <p className="tryon-debug-residuals">
                   anchors{" "}
-                  {debugSnapshot.anchorResiduals.map((item) => `${item.label}:${item.errorPx.toFixed(0)}px`).join(" · ")}
+                  {debugSnapshot.anchorResiduals.map((item) => `${item.label}:${item.errorPx.toFixed(0)}px ${item.errorPct.toFixed(0)}%`).join(" · ")}
                 </p>
               )}
             </aside>
@@ -851,6 +946,10 @@ export function TryOnModal({ product, onClose }: { product: Product; onClose: ()
       </div>
     </section>
   </div>;
+}
+
+function formatSegment(sample: { target: number; actual: number }) {
+  return `${sample.actual.toFixed(2)}/${sample.target.toFixed(2)}`;
 }
 
 function CloseIcon() { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>; }

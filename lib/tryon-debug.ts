@@ -6,7 +6,18 @@ export type TryOnHideReason =
   | "low_confidence"
   | "calibration_failed"
   | "tracking_lost"
+  | "pose_held"
   | "inactive";
+
+/** A fresh solve replaces the accepted time. A held pose keeps the previous time so age keeps growing. */
+export function nextPoseAcceptedAt(previous: number | null, now: number, hideReason: TryOnHideReason) {
+  return hideReason === "none" ? now : previous;
+}
+
+/** Held, lost, and rejected frames stay out of proportion calibration. */
+export function acceptsCalibrationSample(hideReason: TryOnHideReason) {
+  return hideReason === "none";
+}
 
 export type TryOnAssetSource = "glb" | "procedural";
 
@@ -35,6 +46,23 @@ export type DebugScreenJoint = {
 export type DebugAnchorResidual = {
   label: string;
   errorPx: number;
+  errorPct: number;
+};
+
+export type SegmentLengthSample = { target: number; actual: number };
+
+export type SegmentLengthReport = {
+  upperL: SegmentLengthSample;
+  upperR: SegmentLengthSample;
+  forearmL: SegmentLengthSample;
+  forearmR: SegmentLengthSample;
+};
+
+export const EMPTY_SEGMENT_LENGTHS: SegmentLengthReport = {
+  upperL: { target: 0, actual: 0 },
+  upperR: { target: 0, actual: 0 },
+  forearmL: { target: 0, actual: 0 },
+  forearmR: { target: 0, actual: 0 },
 };
 
 export type TryOnDebugSnapshot = {
@@ -55,9 +83,12 @@ export type TryOnDebugSnapshot = {
   videoSource: "live" | "target" | "failed";
   anchorResiduals: DebugAnchorResidual[];
   trackingState: TryOnTrackingState;
+  trackingReasons: string[];
   shoulderRatio: number;
   torsoRatio: number;
   upperArmRatio: number;
+  segmentLengths: SegmentLengthReport;
+  cameraProjection: string;
 };
 
 export const EMPTY_JOINT_CONFIDENCE: JointConfidenceMap = {
@@ -90,9 +121,17 @@ export function emptyDebugSnapshot(partial?: Partial<TryOnDebugSnapshot>): TryOn
     videoSource: "live",
     anchorResiduals: [],
     trackingState: "acquiring",
+    trackingReasons: [],
     shoulderRatio: 1,
     torsoRatio: 1,
     upperArmRatio: 1,
+    segmentLengths: {
+      upperL: { target: 0, actual: 0 },
+      upperR: { target: 0, actual: 0 },
+      forearmL: { target: 0, actual: 0 },
+      forearmR: { target: 0, actual: 0 },
+    },
+    cameraProjection: "perspective 55°",
     ...partial,
   };
 }
@@ -152,9 +191,12 @@ export type TryOnDebugMeterState = {
   videoSource: "live" | "target" | "failed";
   anchorResiduals: DebugAnchorResidual[];
   trackingState: TryOnTrackingState;
+  trackingReasons: string[];
   shoulderRatio: number;
   torsoRatio: number;
   upperArmRatio: number;
+  segmentLengths: SegmentLengthReport;
+  cameraProjection: string;
 };
 
 export function createTryOnDebugMeter(): TryOnDebugMeterState {
@@ -176,9 +218,17 @@ export function createTryOnDebugMeter(): TryOnDebugMeterState {
     videoSource: "live",
     anchorResiduals: [],
     trackingState: "acquiring",
+    trackingReasons: [],
     shoulderRatio: 1,
     torsoRatio: 1,
     upperArmRatio: 1,
+    segmentLengths: {
+      upperL: { target: 0, actual: 0 },
+      upperR: { target: 0, actual: 0 },
+      forearmL: { target: 0, actual: 0 },
+      forearmR: { target: 0, actual: 0 },
+    },
+    cameraProjection: "perspective 55°",
   };
 }
 
@@ -201,9 +251,17 @@ export function snapshotFromMeter(meter: TryOnDebugMeterState, now = performance
     videoSource: meter.videoSource,
     anchorResiduals: meter.anchorResiduals.slice(),
     trackingState: meter.trackingState,
+    trackingReasons: meter.trackingReasons.slice(),
     shoulderRatio: meter.shoulderRatio,
     torsoRatio: meter.torsoRatio,
     upperArmRatio: meter.upperArmRatio,
+    segmentLengths: {
+      upperL: { ...meter.segmentLengths.upperL },
+      upperR: { ...meter.segmentLengths.upperR },
+      forearmL: { ...meter.segmentLengths.forearmL },
+      forearmR: { ...meter.segmentLengths.forearmR },
+    },
+    cameraProjection: meter.cameraProjection,
   };
 }
 

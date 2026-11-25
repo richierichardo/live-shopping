@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   clampRatio,
+  createProportionCalibrator,
   ratiosFromSamples,
   type ProportionSample,
 } from "./tryon-calibration";
@@ -63,6 +64,17 @@ describe("proportion calibration", () => {
     expect(ratios.upperL).toBeLessThan(1.2);
   });
 
+  it("locks ratios after they are ready until reset", () => {
+    const calibrator = createProportionCalibrator();
+    for (let index = 0; index < 10; index += 1) calibrator.push(sample(index * 100, 0.25));
+    const ready = calibrator.current(model, 1000);
+    expect(ready.ready).toBe(true);
+    for (let index = 0; index < 10; index += 1) calibrator.push(sample(2000 + index * 100, 0.5));
+    expect(calibrator.current(model, 3000).upperL).toBe(ready.upperL);
+    calibrator.reset();
+    expect(calibrator.current(model, 4000).ready).toBe(false);
+  });
+
   it("clamps ratios outside 0.75–1.35", () => {
     expect(clampRatio(4)).toBe(1.35);
     expect(clampRatio(0.1)).toBe(0.75);
@@ -90,6 +102,43 @@ describe("tracking state", () => {
     const lost = stepTracking(memory, 600, null, true);
     expect(lost.state).toBe("lost");
     expect(lost.pose).not.toBeNull();
+    expect(lost.reasons).toEqual(["lost_timeout"]);
+    expect(lost.heldJoints).toContain("leftWrist");
+  });
+
+  it("names a filled hip and a briefly held arm", () => {
+    let memory = createTrackMemory();
+    const first = stepTracking(memory, 0, pose(1), true);
+    expect(first.reasons).toEqual([]);
+    expect(first.heldJoints).toEqual([]);
+    memory = first.memory;
+    const dropped = stepTracking(memory, 100, pose(0), true);
+    expect(dropped.reasons).toContain("hip_filled");
+    expect(dropped.heldJoints).toContain("leftHip");
+
+    const weak = pose(1);
+    weak.leftElbow = { x: 40, y: 140, visibility: 0.1 };
+    weak.leftWrist = { x: 30, y: 200, visibility: 0.1 };
+    const held = stepTracking(memory, 150, weak, true);
+    expect(held.state).toBe("degraded");
+    expect(held.reasons).toContain("arm_held");
+    expect(held.heldJoints).toEqual(expect.arrayContaining(["leftElbow", "leftWrist"]));
+    expect(held.pose!.leftElbow.x).toBe(first.pose!.leftElbow.x);
+    expect(held.pose!.leftElbow.x).not.toBe(40);
+  });
+
+  it("holds the torso briefly, then reports no shoulders before any pose", () => {
+    let memory = createTrackMemory();
+    memory = stepTracking(memory, 0, pose(1), true).memory;
+    const held = stepTracking(memory, 200, null, true);
+    expect(held.state).toBe("degraded");
+    expect(held.reasons).toEqual(["torso_held"]);
+    expect(held.heldJoints).toContain("rightShoulder");
+
+    const none = stepTracking(createTrackMemory(), 0, null, false);
+    expect(none.state).toBe("acquiring");
+    expect(none.reasons).toEqual(["no_shoulders"]);
+    expect(none.pose).toBeNull();
   });
 });
 
